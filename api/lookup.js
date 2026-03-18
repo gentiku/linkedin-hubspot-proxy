@@ -3,6 +3,16 @@ export const config = { runtime: "edge" };
 const HUBSPOT_PAT = process.env.HUBSPOT_PAT;
 const PROXY_SECRET = process.env.PROXY_SECRET;
 
+// Constant-time string comparison to prevent timing attacks
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
 // Derive region from PAT prefix (pat-eu1-xxx → app-eu1, pat-na1-xxx → app)
 function getRegion() {
   const m = HUBSPOT_PAT.match(/^pat-(\w+)-/);
@@ -35,16 +45,20 @@ async function getLocationLabels() {
   return cachedLocationLabels;
 }
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Proxy-Secret",
-};
+function getCorsHeaders(req) {
+  const origin = req?.headers?.get("origin") || "";
+  const allowed = origin.endsWith(".linkedin.com") ? origin : "https://www.linkedin.com";
+  return {
+    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Proxy-Secret",
+  };
+}
 
-function json(data, status = 200) {
+function json(data, status = 200, req = null) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+    headers: { ...getCorsHeaders(req), "Content-Type": "application/json" },
   });
 }
 
@@ -83,28 +97,28 @@ async function hsFetch(path, options = {}) {
 
 export default async function handler(req) {
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: CORS_HEADERS });
+    return new Response(null, { status: 204, headers: getCorsHeaders(req) });
   }
 
   if (req.method !== "POST") {
-    return json({ error: "POST only" }, 405);
+    return json({ error: "POST only" }, 405, req);
   }
 
   const secret = req.headers.get("x-proxy-secret");
-  if (!secret || secret !== PROXY_SECRET) {
-    return json({ error: "Unauthorized" }, 401);
+  if (!secret || !timingSafeEqual(secret, PROXY_SECRET)) {
+    return json({ error: "Unauthorized" }, 401, req);
   }
 
   let body;
   try {
     body = await req.json();
   } catch {
-    return json({ error: "Invalid JSON" }, 400);
+    return json({ error: "Invalid JSON" }, 400, req);
   }
 
   const { slug } = body;
-  if (!slug || typeof slug !== "string") {
-    return json({ error: "Missing slug" }, 400);
+  if (!slug || typeof slug !== "string" || slug.length > 100 || !/^[a-z0-9._-]+$/i.test(slug)) {
+    return json({ error: "Invalid slug" }, 400, req);
   }
 
   try {
@@ -136,7 +150,7 @@ export default async function handler(req) {
     });
 
     if (!contact) {
-      return json({ found: false });
+      return json({ found: false }, 200, req);
     }
 
     const contactId = contact.properties.hs_object_id;
@@ -176,8 +190,9 @@ export default async function handler(req) {
       // Non-fatal: return contact without deals
     }
 
-    return json({ found: true, hubspotUrl, contactId, dealLocations });
+    return json({ found: true, hubspotUrl, contactId, dealLocations }, 200, req);
   } catch (err) {
-    return json({ error: err.message }, 502);
+    console.error("Lookup error:", err.message);
+    return json({ error: "Lookup failed" }, 502, req);
   }
 }
