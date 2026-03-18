@@ -76,7 +76,7 @@ export default async function handler(req) {
 
   const secret = req.headers.get("x-proxy-secret");
   if (!secret || secret !== PROXY_SECRET) {
-    return json({ error: "Unauthorized", debug: { hasSecret: !!secret, hasEnv: !!PROXY_SECRET, secretLen: secret?.length, envLen: PROXY_SECRET?.length } }, 401);
+    return json({ error: "Unauthorized" }, 401);
   }
 
   let body;
