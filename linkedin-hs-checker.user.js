@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         LinkedIn HubSpot Checker
 // @namespace    https://github.com/gentian
-// @version      2.0.3
+// @version      2.1.0
 // @description  Check if LinkedIn profiles exist in HubSpot CRM
 // @match        *://*.linkedin.com/in/*
 // @match        *://*.linkedin.com/pub/*
-// @match        *://*.linkedin.com/search/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -48,40 +47,6 @@
 
   function cacheSet(slug, data) {
     cache.set(slug, { data, ts: Date.now() });
-  }
-
-  // ── Rate Limiter ──────────────────────────────────────────────────
-  const MAX_CONCURRENT = 3;
-  let activeRequests = 0;
-  const requestQueue = [];
-
-  function enqueueRequest(fn) {
-    return new Promise((resolve, reject) => {
-      requestQueue.push({ fn, resolve, reject });
-      processQueue();
-    });
-  }
-
-  function processQueue() {
-    while (activeRequests < MAX_CONCURRENT && requestQueue.length > 0) {
-      const { fn, resolve, reject } = requestQueue.shift();
-      activeRequests++;
-      fn()
-        .then(resolve)
-        .catch(reject)
-        .finally(() => {
-          activeRequests--;
-          processQueue();
-        });
-    }
-  }
-
-  function debounce(fn, ms) {
-    let timer;
-    return (...args) => {
-      clearTimeout(timer);
-      timer = setTimeout(() => fn(...args), ms);
-    };
   }
 
   // ── URL Parser ──────────────────────────────────────────────────────
@@ -188,27 +153,6 @@
       color: #f2545b;
     }
     #hs-badge .hs-pill--error svg { color: #f2545b; }
-
-    .hs-search-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      font-size: 11px;
-      font-weight: 600;
-      padding: 1px 8px;
-      border-radius: 10px;
-      margin-left: 6px;
-      vertical-align: middle;
-      line-height: 18px;
-    }
-    .hs-search-tag--found {
-      background: #ff7a59;
-      color: #fff;
-      cursor: pointer;
-    }
-    .hs-search-tag--found:hover { background: #ff5c35; }
-    .hs-search-tag svg { width: 10px; height: 10px; }
   `;
   document.head.appendChild(STYLE);
 
@@ -281,63 +225,6 @@
       });
   }
 
-  // ── Search Results Indicators ───────────────────────────────────────
-  const PROCESSED_ATTR = "data-hs-checked";
-
-  function processSearchResults() {
-    if (!window.location.href.includes("/search/results/people")) return;
-
-    // LinkedIn search result cards contain profile links in spans/anchors
-    const links = document.querySelectorAll(
-      '.reusable-search__result-container a[href*="/in/"]'
-    );
-
-    links.forEach((link) => {
-      // Find the closest result container to avoid duplicate tags
-      const container = link.closest(".reusable-search__result-container");
-      if (!container || container.getAttribute(PROCESSED_ATTR)) return;
-      container.setAttribute(PROCESSED_ATTR, "1");
-
-      const slug = extractSlug(link.href);
-      if (!slug) return;
-
-      enqueueRequest(() => lookupSlug(slug))
-        .then((data) => {
-          if (!data.found) return;
-
-          // Find the name element to append tag next to
-          const nameEl =
-            container.querySelector(".entity-result__title-text a span[dir]") ||
-            container.querySelector(".entity-result__title-text a") ||
-            container.querySelector('a[href*="/in/"] span');
-          if (!nameEl) return;
-
-          // Don't double-add
-          if (nameEl.parentElement.querySelector(".hs-search-tag")) return;
-
-          const tag = document.createElement("span");
-          tag.className = "hs-search-tag hs-search-tag--found";
-          const tagIcon = document.createElement("span");
-          tagIcon.innerHTML = HS_SPROCKET;
-          tag.appendChild(tagIcon);
-          tag.appendChild(document.createTextNode(" HS"));
-          tag.title = data.dealLocations.length
-            ? `In HubSpot | ${data.dealLocations.join(", ")}`
-            : "In HubSpot";
-          tag.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            window.open(data.hubspotUrl, "_blank");
-          });
-
-          nameEl.parentElement.appendChild(tag);
-        })
-        .catch(() => {
-          // Silent fail for search results
-        });
-    });
-  }
-
   // ── SPA Observer ────────────────────────────────────────────────────
   let lastHref = window.location.href;
 
@@ -352,31 +239,13 @@
     } else {
       removeBadge();
     }
-
-    if (url.includes("/search/results/people")) {
-      // Small delay to let DOM render
-      setTimeout(processSearchResults, 800);
-    }
   }
 
-  const debouncedSearchProcess = debounce(processSearchResults, 500);
-
-  const observer = new MutationObserver(() => {
-    onNavigate();
-
-    // Reprocess search results on DOM changes (pagination/scroll), debounced
-    if (window.location.href.includes("/search/results/people")) {
-      debouncedSearchProcess();
-    }
-  });
-
+  const observer = new MutationObserver(onNavigate);
   observer.observe(document.body, { childList: true, subtree: true });
 
   // ── Init ────────────────────────────────────────────────────────────
   if (window.location.href.match(/linkedin\.com\/(?:in|pub)\/[^/]+/)) {
     checkProfile();
-  }
-  if (window.location.href.includes("/search/results/people")) {
-    setTimeout(processSearchResults, 1000);
   }
 })();
