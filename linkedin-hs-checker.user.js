@@ -200,7 +200,8 @@
     pill.appendChild(label);
 
     if (state === "found" && href) {
-      pill.addEventListener("click", () => window.open(href, "_blank"));
+      const safeUrl = /^https:\/\/app(-\w+)?\.hubspot\.com\//.test(href) ? href : null;
+      if (safeUrl) pill.addEventListener("click", () => window.open(safeUrl, "_blank"));
     }
 
     wrap.appendChild(pill);

@@ -38,11 +38,15 @@ function timingSafeEqual(a, b) {
   return mismatch === 0;
 }
 
+// Dummy used when email not found — ensures timing-safe compare always runs
+// preventing email enumeration via response time differences
+const DUMMY_PASSWORD = "antler-dummy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
 function authenticate(email, password) {
   if (!email || !password) return false;
   const stored = USERS[email.toLowerCase()];
-  if (!stored) return false;
-  return timingSafeEqual(password, stored);
+  const match = timingSafeEqual(password, stored || DUMMY_PASSWORD);
+  return !!stored && match;
 }
 
 // ── Version check ─────────────────────────────────────────────────────────────
