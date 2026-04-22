@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LinkedIn HubSpot Checker
 // @namespace    https://github.com/gentian
-// @version      2.1.0
+// @version      3.0.0
 // @description  Check if LinkedIn profiles exist in HubSpot CRM
 // @match        *://*.linkedin.com/in/*
 // @match        *://*.linkedin.com/pub/*
@@ -19,16 +19,32 @@
 
   // ── Config ──────────────────────────────────────────────────────────
   const PROXY_URL = "https://linkedin-hubspot-proxy.vercel.app/api/lookup";
+  const CLIENT_VERSION = "3.0.0";
   const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
-  // Proxy secret stored in Violentmonkey local storage
-  let PROXY_SECRET = GM_getValue("proxy_secret", "");
-  if (!PROXY_SECRET) {
-    PROXY_SECRET = prompt("LinkedIn HubSpot Checker: Enter the proxy secret (ask Gentian)");
-    if (PROXY_SECRET) {
-      GM_setValue("proxy_secret", PROXY_SECRET);
+  // Clear legacy secret if present from old installs
+  if (GM_getValue("proxy_secret", "")) GM_setValue("proxy_secret", "");
+
+  // Email + password auth — stored locally, prompted once on install
+  let USER_EMAIL = GM_getValue("user_email", "");
+  let USER_PASSWORD = GM_getValue("user_password", "");
+
+  if (!USER_EMAIL) {
+    USER_EMAIL = prompt("LinkedIn HubSpot Checker: Enter your Antler email");
+    if (USER_EMAIL) {
+      GM_setValue("user_email", USER_EMAIL.toLowerCase().trim());
+      USER_EMAIL = USER_EMAIL.toLowerCase().trim();
     } else {
-      return; // Can't work without secret
+      return;
+    }
+  }
+
+  if (!USER_PASSWORD) {
+    USER_PASSWORD = prompt("LinkedIn HubSpot Checker: Enter your password (ask Gentian)");
+    if (USER_PASSWORD) {
+      GM_setValue("user_password", USER_PASSWORD);
+    } else {
+      return;
     }
   }
 
@@ -78,7 +94,10 @@
         url: PROXY_URL,
         headers: {
           "Content-Type": "application/json",
-          "X-Proxy-Secret": PROXY_SECRET,
+          "X-User-Email": USER_EMAIL,
+          "X-User-Password": USER_PASSWORD,
+          "X-Timestamp": new Date().toISOString(),
+          "X-Client-Version": CLIENT_VERSION,
         },
         data: JSON.stringify({ slug }),
         responseType: "json",

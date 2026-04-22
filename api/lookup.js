@@ -1,20 +1,29 @@
 export const config = { runtime: "edge" };
 
 const HUBSPOT_PAT = process.env.HUBSPOT_PAT;
-const PROXY_SECRET = process.env.PROXY_SECRET;
+const MIN_CLIENT_VERSION = process.env.MIN_CLIENT_VERSION || "3.0.0";
+
+// USERS: JSON map of { "email@antler.co": "assigned-password" }
+let USERS = {};
+try {
+  USERS = JSON.parse(process.env.USERS || "{}");
+} catch {
+  console.error("USERS env var is not valid JSON");
+}
 
 // ── Rate limiting ────────────────────────────────────────────────────────────
-// In-memory per-IP sliding window. Resets across edge instance restarts.
+// Dual sliding window: per-IP and per-user. Both must pass.
 const RATE_LIMIT = 60;
 const RATE_WINDOW_MS = 60_000;
-const rateLimitMap = new Map();
+const ipRateLimitMap = new Map();
+const userRateLimitMap = new Map();
 
-function checkRateLimit(ip) {
+function checkRateLimit(map, key) {
   const now = Date.now();
-  const window = (rateLimitMap.get(ip) || []).filter((t) => now - t < RATE_WINDOW_MS);
+  const window = (map.get(key) || []).filter((t) => now - t < RATE_WINDOW_MS);
   if (window.length >= RATE_LIMIT) return false;
   window.push(now);
-  rateLimitMap.set(ip, window);
+  map.set(key, window);
   return true;
 }
 
@@ -28,6 +37,23 @@ function timingSafeEqual(a, b) {
   return mismatch === 0;
 }
 
+function authenticate(email, password) {
+  if (!email || !password) return false;
+  const stored = USERS[email.toLowerCase()];
+  if (!stored) return false;
+  return timingSafeEqual(password, stored);
+}
+
+// ── Version check ─────────────────────────────────────────────────────────────
+function meetsMinVersion(version, min) {
+  const parse = (v) => (v || "0").split(".").map(Number);
+  const [aj, an, ap] = parse(version);
+  const [bj, bn, bp] = parse(min);
+  if (aj !== bj) return aj > bj;
+  if (an !== bn) return an > bn;
+  return ap >= bp;
+}
+
 // ── Region ───────────────────────────────────────────────────────────────────
 function getRegion() {
   const m = HUBSPOT_PAT.match(/^pat-(\w+)-/);
@@ -36,7 +62,6 @@ function getRegion() {
 }
 
 // ── Cache: portal ID ─────────────────────────────────────────────────────────
-// patKey guards against stale data if HUBSPOT_PAT changes without a redeploy
 let cachedPortalId = null;
 let cachedPortalIdKey = null;
 async function getPortalId() {
@@ -72,7 +97,7 @@ function getCorsHeaders(req) {
   return {
     "Access-Control-Allow-Origin": allowed,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Proxy-Secret",
+    "Access-Control-Allow-Headers": "Content-Type, X-User-Email, X-User-Password, X-Timestamp, X-Client-Version",
   };
 }
 
@@ -84,10 +109,11 @@ function json(data, status = 200, req = null) {
 }
 
 // ── Audit log ────────────────────────────────────────────────────────────────
-function audit(ip, slug, result, startMs) {
+function audit(ip, user, slug, result, startMs) {
   console.log(JSON.stringify({
     ts: new Date().toISOString(),
     ip,
+    user: user || "unknown",
     slug,
     result,
     ms: Date.now() - startMs,
@@ -142,15 +168,39 @@ export default async function handler(req) {
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0].trim() || "unknown";
   const startMs = Date.now();
 
-  if (!checkRateLimit(ip)) {
-    audit(ip, null, "rate_limited", startMs);
+  // Version check
+  const clientVersion = req.headers.get("x-client-version") || "0.0.0";
+  if (!meetsMinVersion(clientVersion, MIN_CLIENT_VERSION)) {
+    audit(ip, null, null, "outdated_client", startMs);
+    return json({ error: "Client out of date — reinstall the script" }, 426, req);
+  }
+
+  // Timestamp validation — reject requests older than 5 minutes
+  const tsHeader = req.headers.get("x-timestamp");
+  const tsMs = tsHeader ? new Date(tsHeader).getTime() : 0;
+  if (!tsHeader || isNaN(tsMs) || Math.abs(Date.now() - tsMs) > 5 * 60 * 1000) {
+    audit(ip, null, null, "invalid_timestamp", startMs);
+    return json({ error: "Request expired" }, 401, req);
+  }
+
+  // Per-IP rate limit
+  if (!checkRateLimit(ipRateLimitMap, ip)) {
+    audit(ip, null, null, "rate_limited_ip", startMs);
     return json({ error: "Too many requests" }, 429, req);
   }
 
-  const secret = req.headers.get("x-proxy-secret");
-  if (!secret || !timingSafeEqual(secret, PROXY_SECRET)) {
-    audit(ip, null, "unauthorized", startMs);
+  // Auth: email + password
+  const email = (req.headers.get("x-user-email") || "").toLowerCase().trim();
+  const password = req.headers.get("x-user-password") || "";
+  if (!authenticate(email, password)) {
+    audit(ip, email || null, null, "unauthorized", startMs);
     return json({ error: "Unauthorized" }, 401, req);
+  }
+
+  // Per-user rate limit
+  if (!checkRateLimit(userRateLimitMap, email)) {
+    audit(ip, email, null, "rate_limited_user", startMs);
+    return json({ error: "Too many requests" }, 429, req);
   }
 
   let body;
@@ -195,7 +245,7 @@ export default async function handler(req) {
       });
 
     if (contacts.length === 0) {
-      audit(ip, slug, "not_found", startMs);
+      audit(ip, email, slug, "not_found", startMs);
       return json({ found: false }, 200, req);
     }
 
@@ -249,11 +299,11 @@ export default async function handler(req) {
       }
     }
 
-    audit(ip, slug, "found", startMs);
+    audit(ip, email, slug, "found", startMs);
     return json({ found: true, hubspotUrl, contactId: primaryContactId, dealLocations }, 200, req);
   } catch (err) {
     console.error("Lookup error:", err.message);
-    audit(ip, slug, "error", startMs);
+    audit(ip, email, slug, "error", startMs);
     return json({ error: "Lookup failed" }, 502, req);
   }
 }
