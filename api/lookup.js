@@ -48,7 +48,7 @@ const DUMMY_PASSWORD = "antler-dummy-xxxxxxxxxxxx"; // same length as generated 
 
 function authenticate(email, password) {
   if (!email || !password) return false;
-  const stored = USERS[email.toLowerCase()];
+  const stored = Object.hasOwn(USERS, email) ? USERS[email] : null;
   const match = timingSafeEqual(password, stored || DUMMY_PASSWORD);
   return !!stored && match;
 }
@@ -192,7 +192,11 @@ export default async function handler(req, ctx) {
     return json({ error: "POST only" }, 405, req);
   }
 
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0].trim() || "unknown";
+  // x-real-ip is set by Vercel infrastructure and cannot be spoofed by the client.
+  // x-forwarded-for[0] is client-controlled and bypassable for rate limiting.
+  const ip = req.headers.get("x-real-ip") ||
+             req.headers.get("x-forwarded-for")?.split(",").at(-1)?.trim() ||
+             "unknown";
   const startMs = Date.now();
   const clientVersion = req.headers.get("x-client-version") || "0.0.0";
   const wt = (p) => ctx?.waitUntil?.(p); // fire-and-forget helper
